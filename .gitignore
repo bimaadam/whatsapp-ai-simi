@@ -1,1 +1,8 @@
 node_modules
+auth
+auth_info
+data
+lib/auth
+lib/tmp
+sessions
+.env

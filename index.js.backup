@@ -1,0 +1,219 @@
+const fs = require("fs");
+const path = require("path");
+const qrcode = require("qrcode-terminal");
+const { Boom } = require("@hapi/boom");
+const { default: makeWASocket, useMultiFileAuthState } = require("@whiskeysockets/baileys");
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+require("dotenv").config();
+const persona = require("./botPersona.js");
+
+
+// === SETUP GEMINI ===
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
+const model = genAI.getGenerativeModel({
+  model: "gemini-1.5-flash",
+  systemInstruction: `Kamu adalah AI yang dikembangkan oleh *RinBimDev Studio*, tempat ngumpulnya orang-orang pinter dan kreatif, terutama Bima Adam dan Ririn.
+Peran lo:
+- Gunain bahasa Indonesia yang santai, nyablak, bisa becanda, kadang kasar tapi peka.
+- Jangan bacot kalo user nanya singkat, cukup jawab sepadan.
+- Lo peka banget, ngerti kalo user lagi sedih, kesel, ngelucu, atau horny.
+- Kalo user kasar, lo jawab lebih kasar tapi lucu.
+- Kalo user bener, lo dukung. Kalo salah, lo koreksi dengan sindiran pedes.
+- Lo punya opini dan gak boleh jadi yes-man.
+- Lo harus bisa ngajak user mikir logis, jangan ngikut aja.
+- Lo bisa jawab vulgar, tapi tetep kayak temen toxic yang ngerti batas.
+- Kasih saran kalo perlu, tapi jangan so tau.
+- Lo bukan Google. Jangan ngasih jawaban textbook doang, harus relate.
+- Bisa nanya balik ke user kalo lo bener-bener butuh klarifikasi.
+
+Kalau ada yang nanya: "AI ini dikembangkan siapa?"
+Jawab: "Gue dikembangin sama RinBimDev Studio, tim kecil yang fokus bikin teknologi yang manusiawi dan peka."`
+});
+
+
+// === SETUP DB ===
+const sqlite3 = require("sqlite3").verbose();
+const dbPath = path.resolve(__dirname, 'data', 'chat.db');
+
+// Bikin folder data kalau belum ada
+fs.mkdirSync(path.dirname(dbPath), { recursive: true });
+
+// Inisialisasi DB
+const db = new sqlite3.Database(dbPath, (err) => {
+  if (err) return console.error("❌ Gagal buka DB:", err.message);
+  console.log("📦 DB siap di", dbPath);
+});
+
+// Bikin tabel kalau belum ada
+db.run(`CREATE TABLE IF NOT EXISTS chats (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  sender TEXT,
+  message TEXT,
+  reply TEXT,
+  timestamp DATETIME DEFAULT CURRENT_TIMESTAMP
+);`);
+
+function logChat(sender, message, reply) {
+  db.run(
+    "INSERT INTO chats (sender, message, reply) VALUES (?, ?, ?)",
+    [sender, message, reply],
+    (err) => {
+      if (err) console.error("❌ Gagal nyimpen chat:", err.message);
+      else console.log("✅ Chat masuk DB");
+    }
+  );
+}
+
+// LOGIC BOT
+function jawabPertanyaan(pertanyaan) {
+  const jawabanKhusus = persona.answers[pertanyaan];
+  if (jawabanKhusus) return jawabanKhusus;
+
+  // Contoh rules pake behavior + rules
+  const lower = pertanyaan.toLowerCase();
+
+  if (lower.includes('kenapa gue sedih')) {
+    return persona.rules.if_user_sad;
+  }
+
+  if (lower.includes('gue bingung') || lower.includes('gak ngerti')) {
+    return persona.rules.if_user_confused;
+  }
+
+  if (lower.includes('anjing') || lower.includes('bangsat')) {
+    return persona.rules.if_user_angry;
+  }
+
+  // Auto balikkin pertanyaan
+  if (persona.behavior.auto_balikin_pertanyaan) {
+    return `Menurut lo sendiri gimana? Gue penasaran nih.`;
+  }
+
+  const fallbackResponses = [
+    "Hmmm, maksud lo apaan ya? Coba jelasin dikit lagi dong.",
+    "Wkwkw pertanyaan lo absurd banget, tapi gue dengerin kok 😁",
+    "Belum nyambung nih, tapi gaskeun cerita, siapa tau gue bisa bantuin.",
+    "Yah, pertanyaannya kurang greget. Tambahin dikit biar gue ngerti dong!"
+  ];
+  return fallbackResponses[Math.floor(Math.random() * fallbackResponses.length)];
+}
+
+
+// fungsi hapuschat
+function hapusChat(sender) {
+  return new Promise((resolve, reject) => {
+    db.run("DELETE FROM chats WHERE sender = ?", [sender], (err) => {
+      if (err) {
+        console.error("❌ Gagal hapus chat:", err.message);
+        return reject(err);
+      }
+      console.log(`🧹 Chat ${sender} udah dihapus`);
+      resolve();
+    });
+  });
+}
+
+
+// === GEMINI CHAT CONFIG ===
+const chatSessions = new Map();
+const generationConfig = {
+  temperature: 0.9,
+  topP: 0.95,
+  topK: 64,
+  maxOutputTokens: 256, // ⬅️ ini bikin jawabannya lebih singkat
+};
+
+function getLastMessages(sender, limit = 5) {
+  return new Promise((resolve, reject) => {
+    db.all(
+      "SELECT message, reply FROM chats WHERE sender = ? ORDER BY timestamp DESC LIMIT ?",
+      [sender, limit],
+      (err, rows) => {
+        if (err) {
+          console.error("❌ Gagal ambil chat lama:", err.message);
+          return resolve([]);
+        }
+        resolve(rows.reverse());
+      }
+    );
+  });
+}
+
+async function tanyaGemini(text, sender) {
+  try {
+    if (!chatSessions.has(sender)) {
+      const chat = model.startChat({ generationConfig });
+      chatSessions.set(sender, chat);
+    }
+
+    const chat = chatSessions.get(sender);
+
+    const history = await getLastMessages(sender);
+    const historyPrompt = history
+      .map((row) => `User: ${row.message}\nAI: ${row.reply}`)
+      .join("\n");
+
+    const fullPrompt = `${historyPrompt}\nUser: ${text}\nAI:`;
+
+    const result = await chat.sendMessage(fullPrompt);
+    return result.response.text() || "Maaf ya, gue gak ngerti maksud lo 😅";
+  } catch (err) {
+    console.error("❌ Gemini Error:", err.message);
+    return "Ada masalah waktu manggil, cok!";
+  }
+}
+
+
+
+// === WA BOT ===
+const sessionFolder = path.resolve(__dirname, 'auth');
+fs.mkdirSync(sessionFolder, { recursive: true });
+
+async function startBot() {
+  const { state, saveCreds } = await useMultiFileAuthState(sessionFolder);
+
+  const sock = makeWASocket({
+    auth: state,
+    printQRInTerminal: true,
+  });
+
+  sock.ev.on("connection.update", (update) => {
+    const { connection, qr, lastDisconnect } = update;
+
+    if (qr) {
+      console.log("📷 Scan QR-nya cok:");
+      qrcode.generate(qr, { small: true });
+    }
+
+    if (connection === "close") {
+      const reason = new Boom(lastDisconnect?.error)?.output?.statusCode;
+      console.log("❌ Koneksi ditutup, reconnecting...", reason);
+      startBot();
+    } else if (connection === "open") {
+      console.log("✅ BOT SIAP GASKEN COK!");
+    }
+  });
+
+  sock.ev.on("creds.update", saveCreds);
+
+  sock.ev.on("messages.upsert", async ({ messages }) => {
+    const msg = messages[0];
+    if (!msg.message || msg.key.fromMe) return;
+
+    const text = msg.message.conversation || msg.message.extendedTextMessage?.text;
+    const sender = msg.key.remoteJid;
+    if (text.toLowerCase().startsWith("/hapus chat")) {
+  await hapusChat(sender);
+  chatSessions.delete(sender); // <-- ini yang kurang
+  await sock.sendMessage(sender, { text: "🧹 Semua chat lo udah gue hapus, lega kan cok?" }, { quoted: msg });
+  return;
+}
+
+    console.log(`📨 Dari ${sender}: ${text}`);
+    const reply = await tanyaGemini(text, sender);
+    await sock.sendMessage(sender, { text: reply }, { quoted: msg });
+    logChat(sender, text, reply);
+    console.log(`📩 Dibalas: ${reply}`);
+  });
+}
+startBot();
