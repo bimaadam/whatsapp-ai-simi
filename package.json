@@ -1,18 +1,23 @@
 {
   "name": "whatsapp-bot-simi",
   "version": "1.0.0",
+  "description": "A WhatsApp bot using Baileys and Google Cloud Speech-to-Text",
+  "author": "Bima Adam",
   "main": "index.js",
   "scripts": {
     "start": "node index.js"
   },
   "dependencies": {
+    "@google-cloud/speech": "^7.0.1",
     "@google/generative-ai": "^0.24.0",
     "@hapi/boom": "^10.0.1",
-    "@whiskeysockets/baileys": "^6.17.16",
+    "@whiskeysockets/baileys": "^6.5.0",
     "axios": "^1.8.4",
     "dotenv": "^16.4.7",
+    "express": "^5.1.0",
     "qrcode-terminal": "^0.12.0",
     "qs": "^6.14.0",
-    "sqlite3": "^5.1.7"
+    "sqlite3": "^5.1.7",
+    "wa-sticker-formatter": "^4.4.4"
   }
 }

@@ -6,3 +6,4 @@ lib/auth
 lib/tmp
 sessions
 .env
+lib/model_gemini.js
