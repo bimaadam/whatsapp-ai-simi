@@ -1,3 +1,8 @@
 require("dotenv").config();
-const startBot = require("./lib/waBot");
-startBot();
+
+async function main() {
+  const startBot = require("./lib/waBot");
+  await startBot(); // kalau dia async
+}
+
+main();
